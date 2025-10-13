@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fire Loss Inventory</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-white">
+    <div id="root"></div>
+    
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <script type="text/babel">
+        const { useState, useRef, useEffect } = React;
+
+        const FireLossInventoryApp = () => {
+            const [items, setItems] = useState(() => {
+                const saved = localStorage.getItem('fireLossItems');
+                return saved ? JSON.parse(saved) : [];
+            });
+            const [isRecording, setIsRecording] = useState(false);
+            const [currentTranscript, setCurrentTranscript] = useState('');
+            const [editingItem, setEditingItem] = useState(null);
+            const [claimInfo, setClaimInfo] = useState(() => {
+                const saved = localStorage.getItem('fireLossClaimInfo');
+                return saved ? JSON.parse(saved) : {
+                    claimNumber: '',
+                    insuredName: '',
+                    phoneNumber: ''
+                };
+            });
+            const [mergeCandidate, setMergeCandidate] = useState(null);
+            const [errorMessage, setErrorMessage] = useState('');
+            const [micPermission, setMicPermission] = useState('unknown');
+            
+            const recognitionRef = useRef(null);
+
+            // Save to localStorage whenever items or claimInfo change
+            useEffect(() => {
+                localStorage.setItem('fireLossItems', JSON.stringify(items));
+            }, [items]);
+
+            useEffect(() => {
+                localStorage.setItem('fireLossClaimInfo', JSON.stringify(claimInfo));
+            }, [claimInfo]);
+
+            useEffect(() => {
+                // Check if speech recognition is supported
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                
+                if (!SpeechRecognition) {
+                    setErrorMessage('Speech recognition not supported. Please use Chrome or Safari on Android, or Safari on iOS 14.5+');
+                    setMicPermission('unsupported');
+                    return;
+                }
+
+                const recognition = new SpeechRecognition();
+                recognition.continuous = true;
+                recognition.interimResults = true;
+                recognition.lang = 'en-US';
+                
+                recognition.onstart = () => {
+                    setMicPermission('granted');
+                    setErrorMessage('');
+                };
+                
+                recognition.onresult = (event) => {
+                    let transcript = '';
+                    for (let i = event.resultIndex; i < event.results.length; i++) {
+                        transcript += event.results[i][0].transcript;
+                    }
+                    setCurrentTranscript(transcript);
+                    setErrorMessage('');
+                };
+                
+                recognition.onerror = (event) => {
+                    console.error('Speech recognition error:', event.error);
+                    if (event.error === 'not-allowed' || event.error === 'permission-denied') {
+                        setErrorMessage('Microphone permission denied. Please enable in Settings → Safari → Microphone (iOS) or Chrome → Settings → Site Settings → Microphone (Android)');
+                        setMicPermission('denied');
+                    } else if (event.error === 'no-speech') {
+                        setErrorMessage('No speech detected. Try speaking louder.');
+                    } else if (event.error === 'aborted') {
+                        setErrorMessage('Recording stopped. Tap to try again.');
+                    } else {
+                        setErrorMessage(`Error: ${event.error}`);
+                    }
+                    setIsRecording(false);
+                };
+                
+                recognition.onend = () => {
+                    if (isRecording) {
+                        try {
+                            recognition.start();
+                        } catch (err) {
+                            console.error('Error restarting:', err);
+                            setIsRecording(false);
+                        }
+                    }
+                };
+                
+                recognitionRef.current = recognition;
+            }, [isRecording]);
+
+            const startRecording = () => {
+                if (!recognitionRef.current) {
+                    setErrorMessage('Speech recognition not available.');
+                    return;
+                }
+                
+                try {
+                    setCurrentTranscript('');
+                    setErrorMessage('');
+                    setIsRecording(true);
+                    setMicPermission('requesting');
+                    recognitionRef.current.start();
+                } catch (err) {
+                    console.error('Error starting:', err);
+                    setErrorMessage('Failed to start. Try refreshing the page.');
+                    setIsRecording(false);
+                }
+            };
+
+            const stopRecording = () => {
+                if (recognitionRef.current) {
+                    setIsRecording(false);
+                    recognitionRef.current.stop();
+                    
+                    if (currentTranscript.trim()) {
+                        const parsedItem = parseTranscript(currentTranscript);
+                        const possibleMatch = findSimilarItem(parsedItem);
+                        if (possibleMatch) {
+                            setMergeCandidate({ newItem: parsedItem, existingItem: possibleMatch });
+                        } else {
+                            setItems([...items, { ...parsedItem, id: Date.now(), needsPricing: true }]);
+                            setCurrentTranscript('');
+                        }
+                    }
+                }
+            };
+
+            const findSimilarItem = (newItem) => {
+                const recentItems = items.slice(-5);
+                
+                for (let item of recentItems) {
+                    const sameRoom = newItem.room && item.room && 
+                                   newItem.room.toLowerCase() === item.room.toLowerCase();
+                    const sameCategory = newItem.category === item.category;
+                    const sameBrand = newItem.brand && item.brand && 
+                                   newItem.brand.toLowerCase() === item.brand.toLowerCase();
+                    const isAddingDetails = newItem.description.length < 30 && !newItem.brand && !newItem.model;
+                    
+                    if ((sameRoom && sameCategory) || sameBrand || isAddingDetails) {
+                        return item;
+                    }
+                }
+                return null;
+            };
+
+            const mergeMergeCandidate = () => {
+                const { newItem, existingItem } = mergeCandidate;
+                const merged = {
+                    ...existingItem,
+                    description: existingItem.description + '. ' + newItem.description,
+                    brand: newItem.brand || existingItem.brand,
+                    model: newItem.model || existingItem.model,
+                    purchaseLocation: newItem.purchaseLocation || existingItem.purchaseLocation,
+                    purchaseDate: newItem.purchaseDate || existingItem.purchaseDate,
+                    originalCost: newItem.originalCost || existingItem.originalCost,
+                    age: newItem.age || existingItem.age,
+                    quantity: Math.max(newItem.quantity, existingItem.quantity)
+                };
+                
+                setItems(items.map(item => item.id === existingItem.id ? merged : item));
+                setMergeCandidate(null);
+                setCurrentTranscript('');
+            };
+
+            const createNewItem = () => {
+                const { newItem } = mergeCandidate;
+                setItems([...items, { ...newItem, id: Date.now(), needsPricing: true }]);
+                setMergeCandidate(null);
+                setCurrentTranscript('');
+            };
+
+            const parseTranscript = (text) => {
+                const item = {
+                    room: '',
+                    description: text,
+                    brand: '',
+                    model: '',
+                    purchaseLocation: '',
+                    purchaseDate: '',
+                    age: '',
+                    quantity: 1,
+                    originalCost: '',
+                    category: 'General',
+                    estimatedReplacementCost: '',
+                    needsPricing: true
+                };
+
+                const roomMatch = text.match(/(?:in the |from the |from |in |)?(living room|bedroom|master bedroom|guest bedroom|kitchen|bathroom|master bathroom|garage|dining room|office|basement|attic|hallway|closet|laundry room|den|family room)/i);
+                if (roomMatch) {
+                    item.room = roomMatch[1].charAt(0).toUpperCase() + roomMatch[1].slice(1);
+                }
+
+                const brands = ['Samsung', 'Sony', 'LG', 'Apple', 'Dell', 'HP', 'Lenovo', 'Nike', 'Adidas', 'IKEA', 'Ashley', 'Whirlpool', 'KitchenAid', 'GE', 'Maytag', 'Bosch', 'Canon', 'Nikon', 'Microsoft', 'Google', 'Amazon', 'Roku', 'TCL', 'Vizio'];
+                for (let brand of brands) {
+                    if (text.match(new RegExp('\\b' + brand + '\\b', 'i'))) {
+                        item.brand = brand;
+                        break;
+                    }
+                }
+
+                const modelMatch = text.match(/\b[A-Z]{2,}\-?[0-9]{2,}[A-Z0-9]*\b/i);
+                if (modelMatch) {
+                    item.model = modelMatch[0];
+                }
+
+                const costMatch = text.match(/\$\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/);
+                if (costMatch) {
+                    item.originalCost = costMatch[1].replace(',', '');
+                }
+
+                const storeMatch = text.match(/(?:from |at |bought at |purchased at |got it at |)\b(Amazon|Walmart|Target|Best Buy|Home Depot|Lowes|Costco|Sam's Club|IKEA|Macy's|Nordstrom|Wayfair)\b/i);
+                if (storeMatch) {
+                    item.purchaseLocation = storeMatch[1];
+                }
+
+                const yearMatch = text.match(/\b(19|20)\d{2}\b/);
+                if (yearMatch) {
+                    item.purchaseDate = yearMatch[0];
+                }
+
+                const ageMatchYears = text.match(/(\d+)\s*(?:years?|yrs?)\s*(?:old|ago)/i);
+                const ageMatchMonths = text.match(/(\d+)\s*months?\s*(?:old|ago)/i);
+                const ageMatchRange = text.match(/(?:about|around|roughly|approximately)\s*(\d+)\s*(?:to|or|-)\s*(\d+)\s*(?:years?|yrs?)/i);
+                
+                if (ageMatchRange) {
+                    const avg = (parseInt(ageMatchRange[1]) + parseInt(ageMatchRange[2])) / 2;
+                    item.age = `~${Math.round(avg)} years`;
+                    const currentYear = new Date().getFullYear();
+                    item.purchaseDate = String(currentYear - Math.round(avg));
+                } else if (ageMatchYears) {
+                    item.age = `${ageMatchYears[1]} years`;
+                    const currentYear = new Date().getFullYear();
+                    item.purchaseDate = String(currentYear - parseInt(ageMatchYears[1]));
+                } else if (ageMatchMonths) {
+                    item.age = `${ageMatchMonths[1]} months`;
+                }
+
+                const qtyMatch = text.match(/\b(two|three|four|five|six|seven|eight|nine|ten|\d+)\s*(?:of|pairs?|sets?|)/i);
+                if (qtyMatch) {
+                    const qtyText = qtyMatch[1].toLowerCase();
+                    const qtyMap = {'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10};
+                    item.quantity = qtyMap[qtyText] || parseInt(qtyMatch[1]) || 1;
+                }
+
+                if (text.match(/\b(tv|television|computer|laptop|phone|tablet|speaker|stereo|monitor|keyboard|mouse|printer|camera|gaming|xbox|playstation|nintendo)\b/i)) {
+                    item.category = 'Electronics';
+                } else if (text.match(/\b(couch|sofa|chair|table|desk|bed|dresser|nightstand|bookshelf|cabinet|mattress)\b/i)) {
+                    item.category = 'Furniture';
+                } else if (text.match(/\b(shirt|pants|jacket|shoes|dress|suit|jeans|sweater|coat|boots|sneakers)\b/i)) {
+                    item.category = 'Clothing';
+                } else if (text.match(/\b(ring|necklace|bracelet|watch|earring|jewelry)\b/i)) {
+                    item.category = 'Jewelry';
+                } else if (text.match(/\b(refrigerator|fridge|stove|oven|microwave|dishwasher|washer|dryer|toaster)\b/i)) {
+                    item.category = 'Appliances';
+                } else if (text.match(/\b(pot|pan|plate|bowl|cup|glass|knife|fork|spoon|blender)\b/i)) {
+                    item.category = 'Kitchenware';
+                } else if (text.match(/\b(tool|drill|saw|hammer|wrench|ladder|mower|trimmer)\b/i)) {
+                    item.category = 'Tools';
+                }
+
+                return item;
+            };
+
+            const deleteItem = (id) => {
+                setItems(items.filter(item => item.id !== id));
+            };
+
+            const startEdit = (item) => {
+                setEditingItem({ ...item });
+            };
+
+            const saveEdit = () => {
+                setItems(items.map(item => 
+                    item.id === editingItem.id ? editingItem : item
+                ));
+                setEditingItem(null);
+            };
+
+            const generatePricingRequest = () => {
+                const itemList = items.map((item, idx) => {
+                    return `Item ${idx + 1}: ${item.description}
+Brand: ${item.brand || 'Unknown'}
+Model: ${item.model || 'Unknown'}
+Category: ${item.category}
+Age: ${item.age || item.purchaseDate || 'Unknown'}
+Quantity: ${item.quantity}
+Original Cost: ${item.originalCost ? '$' + item.originalCost : 'Unknown'}`;
+                }).join('\n\n');
+
+                const message = `Please look up replacement costs for these items and provide an averaged price from 3 major retailers:
+
+CLAIM INFO:
+Claim #: ${claimInfo.claimNumber}
+Name: ${claimInfo.insuredName}
+Phone: ${claimInfo.phoneNumber}
+
+ITEMS TO PRICE:
+${itemList}
+
+Please search for current prices and give me back a list with replacement costs for each item.`;
+
+                navigator.clipboard.writeText(message).then(() => {
+                    alert('Price lookup request copied! Paste it in chat with Claude.');
+                }).catch(() => {
+                    alert('Copy failed. Please manually copy the text below:\n\n' + message);
+                });
+            };
+
+            const exportToCSV = () => {
+                const headers = [
+                    'Item No',
+                    'Room',
+                    'Description',
+                    'Brand',
+                    'Model',
+                    'Purchase Location',
+                    'Purchase Date',
+                    'Age',
+                    'Quantity',
+                    'Original Cost',
+                    'Category',
+                    'Replacement Cost'
+                ];
+
+                const csvContent = [
+                    'STATE FARM FIRE LOSS INVENTORY',
+                    `Claim Number: ${claimInfo.claimNumber}`,
+                    `Insured Name: ${claimInfo.insuredName}`,
+                    `Phone: ${claimInfo.phoneNumber}`,
+                    `Date: ${new Date().toLocaleDateString()}`,
+                    '',
+                    headers.join(','),
+                    ...items.map((item, idx) => [
+                        idx + 1,
+                        item.room,
+                        `"${item.description.replace(/"/g, '""')}"`,
+                        item.brand,
+                        item.model,
+                        item.purchaseLocation,
+                        item.purchaseDate,
+                        item.age,
+                        item.quantity,
+                        item.originalCost,
+                        item.category,
+                        item.estimatedReplacementCost
+                    ].join(','))
+                ].join('\n');
+
+                const blob = new Blob([csvContent], { type: 'text/csv' });
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `fire-loss-inventory-${claimInfo.claimNumber || Date.now()}.csv`;
+                a.click();
+            };
+
+            return (
+                <div className="min-h-screen bg-gray-900 text-white p-4 pb-24">
+                    {mergeCandidate && (
+                        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
+                            <div className="bg-gray-800 rounded-lg p-6 max-w-lg w-full">
+                                <h3 className="text-xl font-bold mb-4">Possible Duplicate</h3>
+                                <p className="mb-4">Merge with existing item or create new?</p>
+                                
+                                <div className="bg-gray-700 rounded p-3 mb-3">
+                                    <p className="text-sm text-gray-400 mb-1">Existing:</p>
+                                    <p className="font-semibold">{mergeCandidate.existingItem.description}</p>
+                                </div>
+                                
+                                <div className="bg-gray-700 rounded p-3 mb-4">
+                                    <p className="text-sm text-gray-400 mb-1">New:</p>
+                                    <p className="font-semibold">{mergeCandidate.newItem.description}</p>
+                                </div>
+                                
+                                <div className="flex gap-3">
+                                    <button onClick={mergeMergeCandidate} className="flex-1 bg-green-600 hover:bg-green-700 rounded p-3 font-semibold">
+                                        Merge
+                                    </button>
+                                    <button onClick={createNewItem} className="flex-1 bg-blue-600 hover:bg-blue-700 rounded p-3 font-semibold">
+                                        New Item
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="mb-6">
+                        <h1 className="text-3xl font-bold mb-4">🔥 Fire Loss Inventory</h1>
+                        
+                        <div className="bg-gray-800 rounded-lg p-4 mb-4">
+                            <input
+                                type="text"
+                                placeholder="Claim Number"
+                                value={claimInfo.claimNumber}
+                                onChange={(e) => setClaimInfo({...claimInfo, claimNumber: e.target.value})}
+                                className="w-full bg-gray-700 rounded p-3 mb-2 text-lg"
+                            />
+                            <input
+                                type="text"
+                                placeholder="Your Name"
+                                value={claimInfo.insuredName}
+                                onChange={(e) => setClaimInfo({...claimInfo, insuredName: e.target.value})}
+                                className="w-full bg-gray-700 rounded p-3 mb-2 text-lg"
+                            />
+                            <input
+                                type="tel"
+                                placeholder="Phone Number"
+                                value={claimInfo.phoneNumber}
+                                onChange={(e) => setClaimInfo({...claimInfo, phoneNumber: e.target.value})}
+                                className="w-full bg-gray-700 rounded p-3 text-lg"
+                            />
+                        </div>
+                    </div>
+
+                    <div className="mb-6">
+                        {errorMessage && (
+                            <div className="bg-red-600 text-white rounded-lg p-4 mb-4">
+                                <p className="font-semibold">⚠️ {errorMessage}</p>
+                            </div>
+                        )}
+                        
+                        <div className="bg-gradient-to-br from-gray-800 to-gray-900 rounded-lg p-8 text-center shadow-lg">
+                            {!isRecording ? (
+                                <button
+                                    onClick={startRecording}
+                                    className="bg-red-600 hover:bg-red-700 rounded-full w-32 h-32 flex items-center justify-center mx-auto mb-4 transition-all shadow-xl active:scale-95 text-5xl"
+                                >
+                                    🎤
+                                </button>
+                            ) : (
+                                <button
+                                    onClick={stopRecording}
+                                    className="bg-red-600 hover:bg-red-700 rounded-full w-32 h-32 flex items-center justify-center mx-auto mb-4 animate-pulse shadow-xl active:scale-95 text-5xl"
+                                >
+                                    ⏹️
+                                </button>
+                            )}
+                            <p className="text-lg text-gray-300 mb-2 font-semibold">
+                                {isRecording ? '🎤 Recording... Tap to stop' : 'Tap to record'}
+                            </p>
+                            <p className="text-sm text-gray-500">
+                                {micPermission === 'requesting' ? 'Allow microphone access...' : 
+                                 'Speak naturally about each item'}
+                            </p>
+                            {currentTranscript && (
+                                <div className="mt-6 bg-gray-700 rounded-lg p-4 text-left">
+                                    <p className="text-sm text-gray-400 mb-2">Recording:</p>
+                                    <p className="text-base">{currentTranscript}</p>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="mb-6 grid grid-cols-2 gap-3">
+                        <button
+                            onClick={generatePricingRequest}
+                            disabled={items.length === 0}
+                            className="bg-green-600 hover:bg-green-700 disabled:bg-gray-600 rounded-lg px-4 py-4 font-semibold"
+                        >
+                            💰 Get Prices
+                        </button>
+                        <button
+                            onClick={exportToCSV}
+                            disabled={items.length === 0}
+                            className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 rounded-lg px-4 py-4 font-semibold"
+                        >
+                            📥 Export CSV
+                        </button>
+                    </div>
+
+                    <div className="mb-6">
+                        <h2 className="text-2xl font-bold mb-4">Items ({items.length})</h2>
+
+                        {items.map((item, idx) => (
+                            <div key={item.id} className="bg-gray-800 rounded-lg p-4 mb-3">
+                                <div className="flex justify-between items-start">
+                                    <div className="flex-1">
+                                        <div className="flex gap-2 mb-2 flex-wrap">
+                                            <span className="bg-blue-600 text-sm px-2 py-1 rounded">#{idx + 1}</span>
+                                            {item.room && <span className="bg-purple-600 text-sm px-2 py-1 rounded">{item.room}</span>}
+                                            <span className="bg-gray-600 text-sm px-2 py-1 rounded">{item.category}</span>
+                                        </div>
+                                        <p className="font-semibold text-lg mb-2">{item.description}</p>
+                                        <div className="text-sm text-gray-400">
+                                            {item.brand && <p>🏷️ {item.brand}</p>}
+                                            {item.model && <p>📋 {item.model}</p>}
+                                            {item.age && <p>📅 {item.age}</p>}
+                                            {item.originalCost && <p>💵 ${item.originalCost}</p>}
+                                            <p>📦 Qty: {item.quantity}</p>
+                                        </div>
+                                    </div>
+                                    <button
+                                        onClick={() => deleteItem(item.id)}
+                                        className="bg-red-600 hover:bg-red-700 rounded p-2 ml-3"
+                                    >
+                                        🗑️
+                                    </button>
+                                </div>
+                            </div>
+                        ))}
+
+                        {items.length === 0 && (
+                            <div className="text-center text-gray-500 py-12 bg-gray-800 rounded-lg">
+                                <p className="text-5xl mb-4">🎤</p>
+                                <p className="text-lg">No items yet</p>
+                                <p className="text-sm">Start recording</p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        ReactDOM.render(<FireLossInventoryApp />, document.getElementById('root'));
+    </script>
+</body>
+</html>
