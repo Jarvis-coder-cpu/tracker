@@ -2,12 +2,57 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Fire Loss Inventory</title>
+    
+    <!-- PWA Meta Tags -->
+    <meta name="description" content="Track personal property from fire loss for insurance claims">
+    <meta name="theme-color" content="#1f2937">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Fire Tracker">
+    <meta name="mobile-web-app-capable" content="yes">
+    
+    <!-- Samsung/Android Specific -->
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="application-name" content="Fire Loss Tracker">
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="./manifest.json">
+    
+    <!-- Favicon -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>🔥</text></svg>">
+    <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>🔥</text></svg>">
+    
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-gray-900 text-white">
     <div id="root"></div>
+    
+    <!-- Service Worker Registration -->
+    <script>
+        // Register service worker for PWA functionality
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./sw.js')
+                    .then(registration => {
+                        console.log('Service Worker registered:', registration.scope);
+                    })
+                    .catch(error => {
+                        console.log('Service Worker registration failed:', error);
+                    });
+            });
+        }
+
+        // Handle PWA install prompt
+        let deferredPrompt;
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+            // Store the event for later use
+            window.installPromptEvent = e;
+        });
+    </script>
     
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -35,6 +80,8 @@
             const [mergeCandidate, setMergeCandidate] = useState(null);
             const [errorMessage, setErrorMessage] = useState('');
             const [micPermission, setMicPermission] = useState('unknown');
+            const [showInstallPrompt, setShowInstallPrompt] = useState(false);
+            const [isHttps, setIsHttps] = useState(window.location.protocol === 'https:' || window.location.hostname === 'localhost');
             
             const recognitionRef = useRef(null);
 
@@ -47,13 +94,37 @@
                 localStorage.setItem('fireLossClaimInfo', JSON.stringify(claimInfo));
             }, [claimInfo]);
 
+            // Check for install prompt availability
+            useEffect(() => {
+                if (window.installPromptEvent) {
+                    setShowInstallPrompt(true);
+                }
+                
+                const handleInstallPrompt = () => {
+                    setShowInstallPrompt(true);
+                };
+                
+                window.addEventListener('beforeinstallprompt', handleInstallPrompt);
+                
+                return () => {
+                    window.removeEventListener('beforeinstallprompt', handleInstallPrompt);
+                };
+            }, []);
+
             useEffect(() => {
                 // Check if speech recognition is supported
                 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                 
                 if (!SpeechRecognition) {
-                    setErrorMessage('Speech recognition not supported. Please use Chrome or Safari on Android, or Safari on iOS 14.5+');
+                    setErrorMessage('Speech recognition not supported. Please use Chrome on Android or Safari on iOS 14.5+');
                     setMicPermission('unsupported');
+                    return;
+                }
+                
+                // Check for secure context (HTTPS or localhost)
+                if (!isHttps && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+                    setErrorMessage('⚠️ Microphone requires HTTPS. Please access this app via HTTPS or install it as a PWA for full functionality.');
+                    setMicPermission('requires-https');
                     return;
                 }
 
@@ -79,7 +150,19 @@
                 recognition.onerror = (event) => {
                     console.error('Speech recognition error:', event.error);
                     if (event.error === 'not-allowed' || event.error === 'permission-denied') {
-                        setErrorMessage('Microphone permission denied. Please enable in Settings → Safari → Microphone (iOS) or Chrome → Settings → Site Settings → Microphone (Android)');
+                        const isAndroid = /Android/i.test(navigator.userAgent);
+                        const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+                        
+                        let instructions = 'Microphone permission denied. ';
+                        if (isAndroid) {
+                            instructions += 'On Android: Settings → Apps → Chrome/Browser → Permissions → Microphone → Allow. Or install this app by tapping the menu (⋮) → "Add to Home screen"';
+                        } else if (isIOS) {
+                            instructions += 'On iOS: Settings → Safari → Microphone → Allow. Or install this app by tapping the Share button → "Add to Home Screen"';
+                        } else {
+                            instructions += 'Please enable microphone access in your browser settings and reload the page.';
+                        }
+                        
+                        setErrorMessage(instructions);
                         setMicPermission('denied');
                     } else if (event.error === 'no-speech') {
                         setErrorMessage('No speech detected. Try speaking louder.');
@@ -105,10 +188,34 @@
                 recognitionRef.current = recognition;
             }, [isRecording]);
 
-            const startRecording = () => {
+            const handleInstallClick = async () => {
+                if (window.installPromptEvent) {
+                    window.installPromptEvent.prompt();
+                    const { outcome } = await window.installPromptEvent.userChoice;
+                    console.log(`User response to install prompt: ${outcome}`);
+                    window.installPromptEvent = null;
+                    setShowInstallPrompt(false);
+                }
+            };
+
+            const startRecording = async () => {
                 if (!recognitionRef.current) {
                     setErrorMessage('Speech recognition not available.');
                     return;
+                }
+                
+                // Check microphone permission first
+                if (navigator.permissions && navigator.permissions.query) {
+                    try {
+                        const permissionStatus = await navigator.permissions.query({ name: 'microphone' });
+                        if (permissionStatus.state === 'denied') {
+                            setErrorMessage('Microphone permission was previously denied. Please enable it in your browser settings.');
+                            setMicPermission('denied');
+                            return;
+                        }
+                    } catch (err) {
+                        console.log('Permission query not supported:', err);
+                    }
                 }
                 
                 try {
@@ -119,7 +226,7 @@
                     recognitionRef.current.start();
                 } catch (err) {
                     console.error('Error starting:', err);
-                    setErrorMessage('Failed to start. Try refreshing the page.');
+                    setErrorMessage('Failed to start recording. Please ensure microphone access is allowed and try again.');
                     setIsRecording(false);
                 }
             };
@@ -373,6 +480,40 @@ Please search for current prices and give me back a list with replacement costs 
 
             return (
                 <div className="min-h-screen bg-gray-900 text-white p-4 pb-24">
+                    {/* Install PWA Prompt */}
+                    {showInstallPrompt && (
+                        <div className="bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg p-4 mb-4 shadow-lg">
+                            <div className="flex items-center justify-between">
+                                <div className="flex-1">
+                                    <p className="font-bold text-lg mb-1">📱 Install App</p>
+                                    <p className="text-sm opacity-90">Install for better performance and offline access</p>
+                                </div>
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={handleInstallClick}
+                                        className="bg-white text-blue-600 font-bold px-4 py-2 rounded-lg hover:bg-gray-100"
+                                    >
+                                        Install
+                                    </button>
+                                    <button
+                                        onClick={() => setShowInstallPrompt(false)}
+                                        className="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded-lg"
+                                    >
+                                        ✕
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* HTTPS Warning */}
+                    {!isHttps && (
+                        <div className="bg-yellow-600 text-white rounded-lg p-4 mb-4">
+                            <p className="font-semibold mb-2">⚠️ Security Notice</p>
+                            <p className="text-sm">This app requires HTTPS for microphone access. Please access via HTTPS or install as a PWA by tapping your browser menu → "Add to Home screen"</p>
+                        </div>
+                    )}
+
                     {mergeCandidate && (
                         <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
                             <div className="bg-gray-800 rounded-lg p-6 max-w-lg w-full">
@@ -466,6 +607,21 @@ Please search for current prices and give me back a list with replacement costs 
                                 </div>
                             )}
                         </div>
+                        
+                        {/* Microphone Tips */}
+                        {micPermission === 'denied' && (
+                            <div className="mt-4 bg-blue-900 rounded-lg p-4">
+                                <p className="font-semibold mb-2">🎤 How to Enable Microphone:</p>
+                                <div className="text-sm space-y-2">
+                                    <p><strong>Samsung/Android Chrome:</strong></p>
+                                    <p className="ml-4">1. Tap address bar lock icon 🔒</p>
+                                    <p className="ml-4">2. Tap "Permissions"</p>
+                                    <p className="ml-4">3. Set Microphone to "Allow"</p>
+                                    <p className="ml-4">4. Reload this page</p>
+                                    <p className="mt-2"><strong>Or install as app:</strong> Menu (⋮) → "Add to Home screen"</p>
+                                </div>
+                            </div>
+                        )}
                     </div>
 
                     <div className="mb-6 grid grid-cols-2 gap-3">
